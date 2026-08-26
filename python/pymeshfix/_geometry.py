@@ -49,14 +49,11 @@ def compact_vertices(
 ) -> tuple[np.ndarray, np.ndarray]:
     if not len(faces):
         return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.int32)
-    used = np.unique(faces)
-    valid = used[(used >= 0) & (used < len(vertices))]
-    if (
-        len(valid) == len(vertices)
-        and valid[0] == 0
-        and valid[-1] == len(vertices) - 1
-    ):
+    used = np.zeros(len(vertices), dtype=bool)
+    used[faces] = True
+    if used.all():
         return vertices, np.ascontiguousarray(faces, dtype=np.int32)
+    valid = np.flatnonzero(used)
     remap = np.full(len(vertices), -1, dtype=np.int32)
     remap[valid] = np.arange(len(valid), dtype=np.int32)
     return (

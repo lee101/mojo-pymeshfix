@@ -15,10 +15,10 @@ I = ctypes.c_int64
 F = ctypes.c_double
 
 _SIGNATURES = {
-    "mpf_boundary_edges": ([I, I, I, I, I, I, I], I),
+    "mpf_boundary_edges": ([I, I, I, I, I, I], I),
     "mpf_face_components": ([I, I, I, I, I, I, I], I),
     "mpf_mark_degenerate": ([I, I, I, I, F, I], I),
-    "mpf_mark_intersections": ([I, I, I, F, I, I], I),
+    "mpf_mark_intersections": ([I, I, I, F, I, I, I, I], I),
     "mpf_signed_volume": ([I, I, I], F),
 }
 
@@ -109,15 +109,12 @@ def boundary_edges(faces: np.ndarray, n_vertices: int) -> np.ndarray:
         return np.empty((0, 3), dtype=np.int32)
     n = len(faces) * 3
     keys = np.empty(n, dtype=np.int64)
-    us = np.empty(n, dtype=np.int32)
-    vs = np.empty(n, dtype=np.int32)
-    owners = np.empty(n, dtype=np.int32)
+    order = np.empty(n, dtype=np.int32)
+    edges = np.empty((n, 3), dtype=np.int32)
     count = lib().mpf_boundary_edges(
-        addr(faces), len(faces), n_vertices, addr(keys), addr(us), addr(vs), addr(owners)
+        addr(faces), len(faces), n_vertices, addr(keys), addr(order), addr(edges)
     )
-    return np.column_stack((us[:count], vs[:count], owners[:count])).astype(
-        np.int32, copy=False
-    )
+    return edges[:count]
 
 
 def face_components(faces: np.ndarray, n_vertices: int) -> np.ndarray:
@@ -170,6 +167,8 @@ def intersection_mask(
     if not np.isfinite(epsilon) or epsilon < 0:
         raise ValueError("epsilon must be finite and non-negative")
     flags = np.empty(len(faces), dtype=np.int32)
+    bounds = np.empty((len(faces), 6), dtype=np.float64)
+    order = np.empty(len(faces), dtype=np.int32)
     lib().mpf_mark_intersections(
         addr(vertices),
         addr(faces),
@@ -177,6 +176,8 @@ def intersection_mask(
         epsilon,
         int(justproper),
         addr(flags),
+        addr(bounds),
+        addr(order),
     )
     return flags.astype(bool)
 

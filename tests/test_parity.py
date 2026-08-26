@@ -320,7 +320,30 @@ def test_face_components_simd_tail():
     assert labels.tolist() == list(range(5))
 
 
-@pytest.mark.parametrize("n_faces", [32767, 32768])
+def test_signed_volume_simd_tail():
+    points = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 0.5, 0.25],
+        ],
+        dtype=np.float64,
+    )
+    faces = np.array(
+        [[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3], [1, 4, 5]],
+        dtype=np.int32,
+    )
+    a = points[faces[:, 0]]
+    b = points[faces[:, 1]]
+    c = points[faces[:, 2]]
+    expected = np.einsum("ij,ij->", a, np.cross(b, c)) / 6.0
+    assert np.isclose(_lib.signed_volume(points, faces), expected, rtol=1e-14)
+
+
+@pytest.mark.parametrize("n_faces", [65535, 65536])
 def test_topology_parallel_threshold(n_faces):
     faces = np.tile(np.array([[0, 1, 2]], dtype=np.int32), (n_faces, 1))
     assert _lib.boundary_edges(faces, 3).shape == (0, 3)

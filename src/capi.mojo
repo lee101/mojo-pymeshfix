@@ -1,5 +1,6 @@
 """Compute kernels for triangular mesh inspection and repair."""
 
+from std.algorithm import parallelize
 from std.math import abs, iota, sqrt
 from std.sys import simd_width_of
 
@@ -8,82 +9,90 @@ comptime I32Ptr = UnsafePointer[Int32, AnyOrigin[mut=True]]
 comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 
 
-def swap_key3(keys: I64Ptr, a: I32Ptr, b: I32Ptr, c: I32Ptr, i: Int, j: Int):
-    var tk = keys[i]
-    keys[i] = keys[j]
-    keys[j] = tk
-    var tv = a[i]
-    a[i] = a[j]
-    a[j] = tv
-    tv = b[i]
-    b[i] = b[j]
-    b[j] = tv
-    tv = c[i]
-    c[i] = c[j]
-    c[j] = tv
-
-
-def sift_key3(
-    keys: I64Ptr, a: I32Ptr, b: I32Ptr, c: I32Ptr, start: Int, end: Int
-):
-    var root = start
-    while root * 2 + 1 <= end:
-        var child = root * 2 + 1
-        if child + 1 <= end and keys[child] < keys[child + 1]:
-            child += 1
-        if keys[root] >= keys[child]:
-            return
-        swap_key3(keys, a, b, c, root, child)
-        root = child
-
-
-def sort_key3(keys: I64Ptr, a: I32Ptr, b: I32Ptr, c: I32Ptr, n: Int):
+def sort_edge_order(keys: I64Ptr, order: I32Ptr, n: Int):
     if n < 2:
         return
     var start = (n - 2) // 2
     while start >= 0:
-        sift_key3(keys, a, b, c, start, n - 1)
+        var root = start
+        while root * 2 + 1 < n:
+            var child = root * 2 + 1
+            if (
+                child + 1 < n
+                and keys[Int(order[child])] < keys[Int(order[child + 1])]
+            ):
+                child += 1
+            if keys[Int(order[root])] >= keys[Int(order[child])]:
+                break
+            var tmp = order[root]
+            order[root] = order[child]
+            order[child] = tmp
+            root = child
         start -= 1
     var end = n - 1
     while end > 0:
-        swap_key3(keys, a, b, c, 0, end)
+        var tmp = order[0]
+        order[0] = order[end]
+        order[end] = tmp
         end -= 1
-        sift_key3(keys, a, b, c, 0, end)
+        var root = 0
+        while root * 2 + 1 <= end:
+            var child = root * 2 + 1
+            if (
+                child + 1 <= end
+                and keys[Int(order[child])] < keys[Int(order[child + 1])]
+            ):
+                child += 1
+            if keys[Int(order[root])] >= keys[Int(order[child])]:
+                break
+            tmp = order[root]
+            order[root] = order[child]
+            order[child] = tmp
+            root = child
 
 
-def swap_key1(keys: I64Ptr, values: I32Ptr, i: Int, j: Int):
-    var tk = keys[i]
-    keys[i] = keys[j]
-    keys[j] = tk
-    var tv = values[i]
-    values[i] = values[j]
-    values[j] = tv
-
-
-def sift_key1(keys: I64Ptr, values: I32Ptr, start: Int, end: Int):
-    var root = start
-    while root * 2 + 1 <= end:
-        var child = root * 2 + 1
-        if child + 1 <= end and keys[child] < keys[child + 1]:
-            child += 1
-        if keys[root] >= keys[child]:
-            return
-        swap_key1(keys, values, root, child)
-        root = child
-
-
-def sort_key1(keys: I64Ptr, values: I32Ptr, n: Int):
+def sort_bound_order(bounds: FPtr, order: I32Ptr, n: Int):
     if n < 2:
         return
     var start = (n - 2) // 2
     while start >= 0:
-        sift_key1(keys, values, start, n - 1)
+        var root = start
+        while root * 2 + 1 < n:
+            var child = root * 2 + 1
+            if (
+                child + 1 < n
+                and bounds[Int(order[child]) * 6]
+                < bounds[Int(order[child + 1]) * 6]
+            ):
+                child += 1
+            if bounds[Int(order[root]) * 6] >= bounds[Int(order[child]) * 6]:
+                break
+            var tmp = order[root]
+            order[root] = order[child]
+            order[child] = tmp
+            root = child
         start -= 1
     var end = n - 1
     while end > 0:
-        swap_key1(keys, values, 0, end)
+        var tmp = order[0]
+        order[0] = order[end]
+        order[end] = tmp
         end -= 1
-        sift_key1(keys, values, 0, end)
+        var root = 0
+        while root * 2 + 1 <= end:
+            var child = root * 2 + 1
+            if (
+                child + 1 <= end
+                and bounds[Int(order[child]) * 6]
+                < bounds[Int(order[child + 1]) * 6]
+            ):
+                child += 1
+            if bounds[Int(order[root]) * 6] >= bounds[Int(order[child]) * 6]:
+                break
+            tmp = order[root]
+            order[root] = order[child]
+            order[child] = tmp
+            root = child
 
 
 def edge_key(u: Int, v: Int, n_vertices: Int) -> Int64:
@@ -101,28 +110,18 @@ def boundary_edges(
     n_faces: Int,
     n_vertices: Int,
     keys_addr: Int,
-    u_addr: Int,
-    v_addr: Int,
-    face_addr: Int,
+    order_addr: Int,
+    edges_addr: Int,
 ) abi("C") -> Int:
     var faces = I32Ptr(unsafe_from_address=faces_addr)
     var keys = I64Ptr(unsafe_from_address=keys_addr)
-    var us = I32Ptr(unsafe_from_address=u_addr)
-    var vs = I32Ptr(unsafe_from_address=v_addr)
-    var owners = I32Ptr(unsafe_from_address=face_addr)
+    var order = I32Ptr(unsafe_from_address=order_addr)
+    var edges = I32Ptr(unsafe_from_address=edges_addr)
     comptime chunk_size = 2048
 
     def prepare_chunk(
         chunk: Int,
-    ) {
-        imm faces,
-        imm keys,
-        imm us,
-        imm vs,
-        imm owners,
-        imm n_faces,
-        imm n_vertices,
-    }:
+    ) {imm faces, imm keys, imm order, imm n_faces, imm n_vertices,}:
         var start = chunk * chunk_size
         var end = min(start + chunk_size, n_faces)
         for f in range(start, end):
@@ -133,32 +132,35 @@ def boundary_edges(
             keys[base] = edge_key(a, b, n_vertices)
             keys[base + 1] = edge_key(b, c, n_vertices)
             keys[base + 2] = edge_key(c, a, n_vertices)
-            us[base] = Int32(a)
-            us[base + 1] = Int32(b)
-            us[base + 2] = Int32(c)
-            vs[base] = Int32(b)
-            vs[base + 1] = Int32(c)
-            vs[base + 2] = Int32(a)
-            owners[base] = Int32(f)
-            owners[base + 1] = Int32(f)
-            owners[base + 2] = Int32(f)
+            order[base] = Int32(base)
+            order[base + 1] = Int32(base + 1)
+            order[base + 2] = Int32(base + 2)
 
-    for chunk in range((n_faces + chunk_size - 1) // chunk_size):
-        prepare_chunk(chunk)
+    var chunks = (n_faces + chunk_size - 1) // chunk_size
+    if n_faces >= 65536:
+        parallelize(prepare_chunk, chunks, min(chunks, 8))
+    else:
+        for chunk in range(chunks):
+            prepare_chunk(chunk)
     var n = n_faces * 3
-    sort_key3(keys, us, vs, owners, n)
+    sort_edge_order(keys, order, n)
     var write = 0
     var i = 0
     while i < n:
         var j = i + 1
-        while j < n and keys[j] == keys[i]:
+        var edge = Int(order[i])
+        while j < n and keys[Int(order[j])] == keys[edge]:
             j += 1
-        if j - i == 1 and us[i] != vs[i]:
-            keys[write] = keys[i]
-            us[write] = us[i]
-            vs[write] = vs[i]
-            owners[write] = owners[i]
-            write += 1
+        if j - i == 1:
+            var owner = edge // 3
+            var local = edge - owner * 3
+            var u = faces[owner * 3 + local]
+            var v = faces[owner * 3 + (local + 1) % 3]
+            if u != v:
+                edges[write * 3] = u
+                edges[write * 3 + 1] = v
+                edges[write * 3 + 2] = Int32(owner)
+                write += 1
         i = j
     return write
 
@@ -223,19 +225,24 @@ def face_components(
             keys[base] = edge_key(a, b, n_vertices)
             keys[base + 1] = edge_key(b, c, n_vertices)
             keys[base + 2] = edge_key(c, a, n_vertices)
-            edge_faces[base] = Int32(f)
-            edge_faces[base + 1] = Int32(f)
-            edge_faces[base + 2] = Int32(f)
+            edge_faces[base] = Int32(base)
+            edge_faces[base + 1] = Int32(base + 1)
+            edge_faces[base + 2] = Int32(base + 2)
 
-    for chunk in range((n_faces + chunk_size - 1) // chunk_size):
-        prepare_chunk(chunk)
+    var chunks = (n_faces + chunk_size - 1) // chunk_size
+    if n_faces >= 65536:
+        parallelize(prepare_chunk, chunks, min(chunks, 8))
+    else:
+        for chunk in range(chunks):
+            prepare_chunk(chunk)
     var n = n_faces * 3
-    sort_key1(keys, edge_faces, n)
+    sort_edge_order(keys, edge_faces, n)
     var i = 0
     while i < n:
         var j = i + 1
-        while j < n and keys[j] == keys[i]:
-            unite(parent, Int(edge_faces[i]), Int(edge_faces[j]))
+        var edge = Int(edge_faces[i])
+        while j < n and keys[Int(edge_faces[j])] == keys[edge]:
+            unite(parent, edge // 3, Int(edge_faces[j]) // 3)
             j += 1
         i = j
     for f in range(n_faces):
@@ -625,17 +632,43 @@ def mark_intersections(
     epsilon: Float64,
     justproper: Int,
     flags_addr: Int,
+    bounds_addr: Int,
+    order_addr: Int,
 ) abi("C") -> Int:
     var vertices = FPtr(unsafe_from_address=vertices_addr)
     var faces = I32Ptr(unsafe_from_address=faces_addr)
     var flags = I32Ptr(unsafe_from_address=flags_addr)
+    var bounds = FPtr(unsafe_from_address=bounds_addr)
+    var order = I32Ptr(unsafe_from_address=order_addr)
     for f in range(n_faces):
         flags[f] = 0
-    for i in range(n_faces):
+        order[f] = Int32(f)
+        var a = Int(faces[f * 3])
+        var b = Int(faces[f * 3 + 1])
+        var c = Int(faces[f * 3 + 2])
+        for axis in range(3):
+            var av = vertices[a * 3 + axis]
+            var bv = vertices[b * 3 + axis]
+            var cv = vertices[c * 3 + axis]
+            bounds[f * 6 + axis * 2] = min(av, min(bv, cv))
+            bounds[f * 6 + axis * 2 + 1] = max(av, max(bv, cv))
+    sort_bound_order(bounds, order, n_faces)
+    for position in range(n_faces):
+        var i = Int(order[position])
         var a0 = Int(faces[i * 3])
         var a1 = Int(faces[i * 3 + 1])
         var a2 = Int(faces[i * 3 + 2])
-        for j in range(i + 1, n_faces):
+        for following in range(position + 1, n_faces):
+            var j = Int(order[following])
+            if bounds[j * 6] > bounds[i * 6 + 1] + epsilon:
+                break
+            if (
+                bounds[i * 6 + 3] < bounds[j * 6 + 2] - epsilon
+                or bounds[j * 6 + 3] < bounds[i * 6 + 2] - epsilon
+                or bounds[i * 6 + 5] < bounds[j * 6 + 4] - epsilon
+                or bounds[j * 6 + 5] < bounds[i * 6 + 4] - epsilon
+            ):
+                continue
             if triangles_intersect(
                 vertices,
                 a0,
@@ -661,8 +694,29 @@ def signed_volume(
 ) abi("C") -> Float64:
     var vertices = FPtr(unsafe_from_address=vertices_addr)
     var faces = I32Ptr(unsafe_from_address=faces_addr)
-    var total = 0.0
-    for f in range(n_faces):
+    comptime W = simd_width_of[DType.float64]()
+    var vector_total = SIMD[DType.float64, W](0.0)
+    var f = 0
+    while f + W <= n_faces:
+        var face_offsets = iota[DType.int32, W](Int32(f)) * 3
+        var a = faces.gather(face_offsets) * 3
+        var b = faces.gather(face_offsets + 1) * 3
+        var c = faces.gather(face_offsets + 2) * 3
+        var ax = vertices.gather(a)
+        var ay = vertices.gather(a + 1)
+        var az = vertices.gather(a + 2)
+        var bx = vertices.gather(b)
+        var by = vertices.gather(b + 1)
+        var bz = vertices.gather(b + 2)
+        var cx = vertices.gather(c)
+        var cy = vertices.gather(c + 1)
+        var cz = vertices.gather(c + 2)
+        vector_total += ax * (by * cz - bz * cy)
+        vector_total += ay * (bz * cx - bx * cz)
+        vector_total += az * (bx * cy - by * cx)
+        f += W
+    var total = vector_total.reduce_add()
+    while f < n_faces:
         var a = Int(faces[f * 3])
         var b = Int(faces[f * 3 + 1])
         var c = Int(faces[f * 3 + 2])
@@ -675,4 +729,5 @@ def signed_volume(
         total += vertices[a * 3] * (by * cz - bz * cy)
         total += vertices[a * 3 + 1] * (bz * cx - bx * cz)
         total += vertices[a * 3 + 2] * (bx * cy - by * cx)
+        f += 1
     return total / 6.0

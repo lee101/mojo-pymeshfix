@@ -94,11 +94,11 @@ real conda-forge pymeshfix 0.18.1 extension on the same arrays.
 
 | Operation | Mojo port | pymeshfix 0.18.1 | Mojo speedup |
 |---|---:|---:|---:|
-| load + boundaries, 50k faces | 93.175 ms | 135.202 ms | 1.45x |
-| fill 256-edge hole | 4.514 ms | 18.394 ms | 4.07x |
-| select intersections, 200 tris | 0.283 ms | 0.390 ms | 1.38x |
-| keep largest of 250 shells | 2.470 ms | 4.160 ms | 1.68x |
-| full repair, 96-face cylinder | 2.680 ms | 2.858 ms | 1.07x |
+| load + boundaries, 50k faces | 75.187 ms | 136.076 ms | 1.81x |
+| fill 256-edge hole | 5.393 ms | 20.992 ms | 3.89x |
+| select intersections, 200 tris | 0.109 ms | 0.498 ms | 4.55x |
+| keep largest of 250 shells | 2.501 ms | 4.332 ms | 1.73x |
+| full repair, 96-face cylinder | 2.636 ms | 2.891 ms | 1.10x |
 
 The port is ahead on every measured operation. Connectivity welding,
 orientation, and closed-component volume checks run in bulk instead of
@@ -127,14 +127,15 @@ C-contiguity, index ranges, ABI size limits, and non-null storage for non-empty
 arrays. Python keeps every NumPy owner alive until the synchronous call returns;
 empty work is handled without constructing Mojo pointers.
 
-Boundary classification and connected components sort packed undirected edge
-keys. Large independent edge-preparation passes use eight CPU workers above a
-32,768-face threshold, while smaller meshes stay serial. Component setup and
-counting use native-width SIMD with scalar remainder handling. Intersection
-selection first rejects pairs by bounding boxes, then uses segment-triangle
-predicates or dominant-axis 2D predicates for coplanar pairs. The Python
-topology layer walks oriented boundary loops and uses a convex fan fast path
-before falling back to ear clipping.
+Boundary classification and connected components sort an index array over
+packed undirected edge keys, avoiding multi-array swaps. Large independent
+edge-preparation passes use up to eight CPU workers at a 65,536-face threshold,
+while smaller meshes stay serial. Component setup and counting and signed-volume
+reduction use native-width SIMD with scalar remainder handling. Intersection
+selection precomputes face bounds, sweeps triangles in minimum-x order, and then
+uses segment-triangle predicates or dominant-axis 2D predicates for coplanar
+pairs. The Python topology layer walks oriented boundary loops and uses a convex
+fan fast path before falling back to ear clipping.
 
 ## Development
 

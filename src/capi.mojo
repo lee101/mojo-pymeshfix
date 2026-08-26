@@ -1,6 +1,5 @@
 """Compute kernels for triangular mesh inspection and repair."""
 
-from std.algorithm import parallelize
 from std.math import abs, iota, sqrt
 from std.sys import simd_width_of
 
@@ -144,11 +143,8 @@ def boundary_edges(
             owners[base + 1] = Int32(f)
             owners[base + 2] = Int32(f)
 
-    if n_faces >= 32768:
-        parallelize(prepare_chunk, (n_faces + chunk_size - 1) // chunk_size, 8)
-    else:
-        for chunk in range((n_faces + chunk_size - 1) // chunk_size):
-            prepare_chunk(chunk)
+    for chunk in range((n_faces + chunk_size - 1) // chunk_size):
+        prepare_chunk(chunk)
     var n = n_faces * 3
     sort_key3(keys, us, vs, owners, n)
     var write = 0
@@ -231,11 +227,8 @@ def face_components(
             edge_faces[base + 1] = Int32(f)
             edge_faces[base + 2] = Int32(f)
 
-    if n_faces >= 32768:
-        parallelize(prepare_chunk, (n_faces + chunk_size - 1) // chunk_size, 8)
-    else:
-        for chunk in range((n_faces + chunk_size - 1) // chunk_size):
-            prepare_chunk(chunk)
+    for chunk in range((n_faces + chunk_size - 1) // chunk_size):
+        prepare_chunk(chunk)
     var n = n_faces * 3
     sort_key1(keys, edge_faces, n)
     var i = 0

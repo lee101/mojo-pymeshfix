@@ -1,6 +1,6 @@
 """Compute kernels for triangular mesh inspection and repair."""
 
-from std.algorithm import parallelize
+from max.algorithm import parallelize
 from std.math import abs, iota, sqrt
 from std.sys import simd_width_of
 

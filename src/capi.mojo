@@ -250,7 +250,7 @@ def face_components(
     var count = 0
     p = 0
     while p + W <= n_faces:
-        var roots = labels.load[width=W](p)
+        var roots = labels.unsafe_load[width=W](p)
         var indices = iota[DType.int32, W](Int32(p))
         var matches = roots.eq(indices)
         count += Int(

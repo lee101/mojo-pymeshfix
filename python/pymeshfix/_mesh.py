@@ -10,6 +10,7 @@ from ._geometry import (
     checked_arrays,
     compact_vertices,
     fix_connectivity as repair_connectivity,
+    first_occurrence_indices,
     orient_faces,
     scale_epsilon,
     triangulate_loop,
@@ -120,9 +121,8 @@ class PyTMesh:
                 self._vertices, self._faces, epsilon * epsilon
             )
             canonical = np.sort(self._faces, axis=1)
-            _, first = np.unique(canonical, axis=0, return_index=True)
             duplicates = np.ones(len(self._faces), dtype=bool)
-            duplicates[first] = False
+            duplicates[first_occurrence_indices(canonical)] = False
             mask |= duplicates
             if not mask.any():
                 return True

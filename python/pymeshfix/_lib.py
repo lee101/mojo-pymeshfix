@@ -15,11 +15,12 @@ I = ctypes.c_int64
 F = ctypes.c_double
 
 _SIGNATURES = {
-    "mpf_boundary_edges": ([I, I, I, I, I, I], I),
-    "mpf_face_components": ([I, I, I, I, I, I, I], I),
+    "mpf_boundary_edges": ([I] * 8, I),
+    "mpf_face_components": ([I] * 9, I),
     "mpf_mark_degenerate": ([I, I, I, I, F, I], I),
     "mpf_mark_intersections": ([I, I, I, F, I, I, I, I], I),
     "mpf_signed_volume": ([I, I, I], F),
+    "mpf_orient": ([I] * 15, I),
 }
 
 
@@ -110,9 +111,18 @@ def boundary_edges(faces: np.ndarray, n_vertices: int) -> np.ndarray:
     n = len(faces) * 3
     keys = np.empty(n, dtype=np.int64)
     order = np.empty(n, dtype=np.int32)
+    keys2 = np.empty(n, dtype=np.int64)
+    order2 = np.empty(n, dtype=np.int32)
     edges = np.empty((n, 3), dtype=np.int32)
     count = lib().mpf_boundary_edges(
-        addr(faces), len(faces), n_vertices, addr(keys), addr(order), addr(edges)
+        addr(faces),
+        len(faces),
+        n_vertices,
+        addr(keys),
+        addr(order),
+        addr(keys2),
+        addr(order2),
+        addr(edges),
     )
     return edges[:count]
 
@@ -124,6 +134,8 @@ def face_components(faces: np.ndarray, n_vertices: int) -> np.ndarray:
     n = len(faces) * 3
     keys = np.empty(n, dtype=np.int64)
     edge_faces = np.empty(n, dtype=np.int32)
+    keys2 = np.empty(n, dtype=np.int64)
+    order2 = np.empty(n, dtype=np.int32)
     parent = np.empty(len(faces), dtype=np.int32)
     labels = np.empty(len(faces), dtype=np.int32)
     lib().mpf_face_components(
@@ -132,10 +144,47 @@ def face_components(faces: np.ndarray, n_vertices: int) -> np.ndarray:
         n_vertices,
         addr(keys),
         addr(edge_faces),
+        addr(keys2),
+        addr(order2),
         addr(parent),
         addr(labels),
     )
     return labels
+
+
+def orient_faces(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    _mesh_buffers(vertices, faces)
+    m = len(faces)
+    n = m * 3
+    out = np.empty((m, 3), dtype=np.int32)
+    keys = np.empty(n, dtype=np.int64)
+    order = np.empty(n, dtype=np.int32)
+    keys2 = np.empty(n, dtype=np.int64)
+    order2 = np.empty(n, dtype=np.int32)
+    pair = np.empty(n, dtype=np.int32)
+    parent = np.empty(m, dtype=np.int32)
+    labels = np.empty(m, dtype=np.int32)
+    flip = np.empty(m, dtype=np.int32)
+    queue = np.empty(m, dtype=np.int32)
+    vol = np.empty(m, dtype=np.float64)
+    lib().mpf_orient(
+        addr(vertices),
+        addr(faces),
+        addr(out),
+        m,
+        len(vertices),
+        addr(keys),
+        addr(order),
+        addr(keys2),
+        addr(order2),
+        addr(pair),
+        addr(parent),
+        addr(labels),
+        addr(flip),
+        addr(queue),
+        addr(vol),
+    )
+    return out
 
 
 def degenerate_mask(

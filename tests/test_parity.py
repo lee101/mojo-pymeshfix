@@ -305,6 +305,8 @@ def test_face_components_simd_tail():
     n = len(faces) * 3
     keys = np.empty(n, dtype=np.int64)
     edge_faces = np.empty(n, dtype=np.int32)
+    keys2 = np.empty(n, dtype=np.int64)
+    order2 = np.empty(n, dtype=np.int32)
     parent = np.empty(len(faces), dtype=np.int32)
     labels = np.empty(len(faces), dtype=np.int32)
     count = _lib.lib().mpf_face_components(
@@ -313,6 +315,8 @@ def test_face_components_simd_tail():
         15,
         _lib.addr(keys),
         _lib.addr(edge_faces),
+        _lib.addr(keys2),
+        _lib.addr(order2),
         _lib.addr(parent),
         _lib.addr(labels),
     )

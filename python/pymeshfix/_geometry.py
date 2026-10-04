@@ -62,28 +62,71 @@ def compact_vertices(
     )
 
 
+def _float_key(column: np.ndarray) -> np.ndarray:
+    bits = np.ascontiguousarray(column).view(np.int64)
+    return bits ^ ((bits >> 63) & 0x7FFFFFFFFFFFFFFF)
+
+
+def _run_starts(first: np.ndarray, second: np.ndarray, third: np.ndarray):
+    if not len(first):
+        return np.empty(0, dtype=np.int64)
+    changed = np.empty(len(first), dtype=bool)
+    changed[0] = True
+    np.logical_or(
+        first[1:] != first[:-1],
+        np.logical_or(second[1:] != second[:-1], third[1:] != third[:-1]),
+        out=changed[1:],
+    )
+    return np.flatnonzero(changed)
+
+
+def weld_vertices(vertices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    x = _float_key(vertices[:, 0])
+    y = _float_key(vertices[:, 1])
+    z = _float_key(vertices[:, 2])
+    order = np.lexsort((z, y, x))
+    starts = _run_starts(x[order], y[order], z[order])
+    group = np.zeros(len(vertices), dtype=np.int32)
+    group[starts] = 1
+    np.cumsum(group, out=group)
+    group -= 1
+    remap = np.empty(len(vertices), dtype=np.int32)
+    remap[order] = group
+    first = np.minimum.reduceat(order, starts)
+    ranking = np.argsort(first, kind="stable")
+    new_vertices = np.ascontiguousarray(vertices[first[ranking]])
+    old_to_new = np.empty(len(starts), dtype=np.int32)
+    old_to_new[ranking] = np.arange(len(starts), dtype=np.int32)
+    return new_vertices, old_to_new[remap]
+
+
+def _canonical_columns(faces: np.ndarray):
+    low = faces.min(axis=1)
+    high = faces.max(axis=1)
+    return low, faces.sum(axis=1, dtype=np.int64) - low - high, high
+
+
+def first_occurrence_indices(faces: np.ndarray) -> np.ndarray:
+    low, mid, high = _canonical_columns(faces)
+    order = np.lexsort((high, mid, low))
+    starts = _run_starts(low[order], mid[order], high[order])
+    return np.minimum.reduceat(order, starts)
+
+
+def dedupe_faces(faces: np.ndarray) -> np.ndarray:
+    keep = first_occurrence_indices(faces)
+    keep.sort()
+    return np.ascontiguousarray(faces[keep], dtype=np.int32)
+
+
 def fix_connectivity(
     vertices: np.ndarray, faces: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     if not len(vertices):
         return vertices, faces
-    _, first_vertices, inverse = np.unique(
-        vertices, axis=0, return_index=True, return_inverse=True
-    )
-    vertex_order = np.argsort(first_vertices)
-    first_vertices = first_vertices[vertex_order]
-    old_to_new = np.empty(len(vertex_order), dtype=np.int32)
-    old_to_new[vertex_order] = np.arange(len(vertex_order), dtype=np.int32)
-    remap = old_to_new[inverse]
-    new_vertices = np.ascontiguousarray(vertices[first_vertices])
-    welded = remap[faces] if len(faces) else faces.copy()
-    if len(welded):
-        canonical = np.sort(welded, axis=1)
-        _, first_faces = np.unique(canonical, axis=0, return_index=True)
-        first_faces.sort()
-        new_faces = np.ascontiguousarray(welded[first_faces], dtype=np.int32)
-    else:
-        new_faces = np.empty((0, 3), dtype=np.int32)
+    new_vertices, remap = weld_vertices(vertices)
+    welded = remap[faces] if len(faces) else np.empty((0, 3), dtype=np.int32)
+    new_faces = dedupe_faces(welded) if len(welded) else welded
     return orient_faces(*compact_vertices(new_vertices, new_faces))
 
 
@@ -92,117 +135,56 @@ def orient_faces(
 ) -> tuple[np.ndarray, np.ndarray]:
     if not len(faces):
         return vertices, faces
-    us = faces.reshape(-1)
-    vs = faces[:, (1, 2, 0)].reshape(-1)
-    owners = np.repeat(np.arange(len(faces), dtype=np.int32), 3)
-    keys = (
-        np.minimum(us, vs).astype(np.int64) * np.int64(len(vertices))
-        + np.maximum(us, vs)
-    )
-    order = np.argsort(keys, kind="stable")
-    sorted_keys = keys[order]
-    starts = np.r_[0, np.flatnonzero(np.diff(sorted_keys)) + 1]
-    counts = np.diff(np.r_[starts, len(sorted_keys)])
-    pair_starts = starts[counts == 2]
-    first = order[pair_starts]
-    second = order[pair_starts + 1]
-    same_direction = (us[first] == us[second]) & (vs[first] == vs[second])
-    oriented = faces.copy()
-    if np.any(same_direction):
-        graph: list[list[tuple[int, bool]]] = [[] for _ in faces]
-        for left, right, toggle in zip(
-            owners[first], owners[second], same_direction, strict=True
-        ):
-            graph[int(left)].append((int(right), bool(toggle)))
-            graph[int(right)].append((int(left), bool(toggle)))
-        flips = np.full(len(faces), -1, dtype=np.int8)
-        for root in range(len(faces)):
-            if flips[root] >= 0:
-                continue
-            flips[root] = 0
-            queue = deque([root])
-            while queue:
-                current = queue.popleft()
-                for neighbor, toggle in graph[current]:
-                    wanted = int(flips[current]) ^ int(toggle)
-                    if flips[neighbor] < 0:
-                        flips[neighbor] = wanted
-                        queue.append(neighbor)
-        selected = np.flatnonzero(flips == 1)
-        oriented[selected, 1], oriented[selected, 2] = (
-            oriented[selected, 2].copy(),
-            oriented[selected, 1].copy(),
-        )
-
-    labels = _lib.face_components(oriented, len(vertices))
-    boundary_starts = starts[counts == 1]
-    open_labels = (
-        np.unique(labels[owners[order[boundary_starts]]])
-        if len(boundary_starts)
-        else np.empty(0, dtype=np.int32)
-    )
-    roots = np.unique(labels)
-    closed_labels = roots[~np.isin(roots, open_labels)]
-    if len(closed_labels) == 1 and len(roots) == 1:
-        negative_labels = (
-            closed_labels
-            if _lib.signed_volume(vertices, oriented) < 0
-            else np.empty(0, dtype=np.int32)
-        )
-    elif len(closed_labels):
-        a = vertices[oriented[:, 0]]
-        b = vertices[oriented[:, 1]]
-        c = vertices[oriented[:, 2]]
-        terms = np.einsum("ij,ij->i", a, np.cross(b, c))
-        root_values, dense_labels = np.unique(labels, return_inverse=True)
-        volumes = np.bincount(dense_labels, weights=terms)
-        negative_labels = root_values[
-            (volumes < 0) & np.isin(root_values, closed_labels)
-        ]
-    else:
-        negative_labels = np.empty(0, dtype=np.int32)
-    selected = np.flatnonzero(np.isin(labels, negative_labels))
-    oriented[selected, 1], oriented[selected, 2] = (
-        oriented[selected, 2].copy(),
-        oriented[selected, 1].copy(),
-    )
-    return vertices, np.ascontiguousarray(oriented)
+    return vertices, _lib.orient_faces(vertices, faces)
 
 
 def boundary_loops(faces: np.ndarray, n_vertices: int) -> list[list[int]]:
     edges = _lib.boundary_edges(faces, n_vertices)
     if not len(edges):
         return []
+    starts = edges[:, 0].tolist()
+    ends = edges[:, 1].tolist()
     outgoing: dict[int, list[int]] = defaultdict(list)
     undirected: dict[int, list[int]] = defaultdict(list)
-    for u, v, _ in edges:
-        outgoing[int(u)].append(int(v))
-        undirected[int(u)].append(int(v))
-        undirected[int(v)].append(int(u))
-    unused = {(int(u), int(v)) for u, v, _ in edges}
+    for u, v in zip(starts, ends):
+        outgoing[u].append(v)
+        undirected[u].append(v)
+        undirected[v].append(u)
+    unused = set(zip(starts, ends))
+    cursor: dict[int, int] = {}
+    limit = len(edges)
     loops: list[list[int]] = []
     while unused:
-        start_edge = next(iter(unused))
-        start, current = start_edge
+        start, current = next(iter(unused))
         loop = [start]
-        unused.remove(start_edge)
-        while current != start and len(loop) <= len(edges):
+        unused.remove((start, current))
+        while current != start and len(loop) <= limit:
             loop.append(current)
-            candidates = [v for v in outgoing.get(current, ()) if (current, v) in unused]
-            if candidates:
-                nxt = candidates[0]
-                unused.remove((current, nxt))
-            else:
-                candidates = [
-                    v
-                    for v in undirected.get(current, ())
-                    if (current, v) in unused or (v, current) in unused
-                ]
-                if not candidates:
-                    break
-                nxt = candidates[0]
-                unused.discard((current, nxt))
-                unused.discard((nxt, current))
+            options = outgoing.get(current)
+            nxt = None
+            if options:
+                index = cursor.get(current, 0)
+                while index < len(options):
+                    candidate = options[index]
+                    if (current, candidate) in unused:
+                        break
+                    index += 1
+                cursor[current] = index
+                if index < len(options):
+                    nxt = options[index]
+                    unused.remove((current, nxt))
+            if nxt is None:
+                for candidate in undirected.get(current, ()):
+                    if (current, candidate) in unused or (
+                        candidate,
+                        current,
+                    ) in unused:
+                        nxt = candidate
+                        unused.discard((current, candidate))
+                        unused.discard((candidate, current))
+                        break
+            if nxt is None:
+                break
             current = nxt
         if current == start and len(loop) >= 3:
             loops.append(loop)

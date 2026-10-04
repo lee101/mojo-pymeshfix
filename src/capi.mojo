@@ -3,52 +3,74 @@
 from max.algorithm import parallelize
 from std.math import abs, iota, sqrt
 from std.sys import simd_width_of
+from std.utils import StaticTuple
+
+comptime RBITS: Int = 8
+comptime RBUCKETS: Int = 1 << RBITS
 
 comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime I32Ptr = UnsafePointer[Int32, AnyOrigin[mut=True]]
 comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 
 
-def sort_edge_order(keys: I64Ptr, order: I32Ptr, n: Int):
+
+def even_passes(max_key: Int64) -> Int:
+    var bits = RBITS
+    var rest = Int64(RBITS)
+    while (max_key >> rest) > 0:
+        bits += RBITS
+        rest += Int64(RBITS)
+    return 2 * max((bits + 2 * RBITS - 1) // (2 * RBITS), 1)
+
+
+def radix_sort(
+    keys: I64Ptr,
+    order: I32Ptr,
+    keys2: I64Ptr,
+    order2: I32Ptr,
+    n: Int,
+    passes: Int,
+):
     if n < 2:
         return
-    var start = (n - 2) // 2
-    while start >= 0:
-        var root = start
-        while root * 2 + 1 < n:
-            var child = root * 2 + 1
-            if (
-                child + 1 < n
-                and keys[Int(order[child])] < keys[Int(order[child + 1])]
-            ):
-                child += 1
-            if keys[Int(order[root])] >= keys[Int(order[child])]:
-                break
-            var tmp = order[root]
-            order[root] = order[child]
-            order[child] = tmp
-            root = child
-        start -= 1
-    var end = n - 1
-    while end > 0:
-        var tmp = order[0]
-        order[0] = order[end]
-        order[end] = tmp
-        end -= 1
-        var root = 0
-        while root * 2 + 1 <= end:
-            var child = root * 2 + 1
-            if (
-                child + 1 <= end
-                and keys[Int(order[child])] < keys[Int(order[child + 1])]
-            ):
-                child += 1
-            if keys[Int(order[root])] >= keys[Int(order[child])]:
-                break
-            tmp = order[root]
-            order[root] = order[child]
-            order[child] = tmp
-            root = child
+    var hist = StaticTuple[Int32, RBUCKETS]()
+    var src_k = keys
+    var dst_k = keys2
+    var src_o = order
+    var dst_o = order2
+    for p in range(passes):
+        var d = 0
+        while d < RBUCKETS:
+            hist[d] = Int32(0)
+            d += 1
+        var shift = Int64(p * RBITS)
+        var i = 0
+        while i < n:
+            var b = Int((src_k[i] >> shift) & Int64(RBUCKETS - 1))
+            hist[b] = hist[b] + Int32(1)
+            i += 1
+        var running = Int32(0)
+        d = 0
+        while d < RBUCKETS:
+            var c = hist[d]
+            hist[d] = running
+            running += c
+            d += 1
+        i = 0
+        while i < n:
+            var k = src_k[i]
+            var b = Int((k >> shift) & Int64(RBUCKETS - 1))
+            var pos = Int(hist[b])
+            hist[b] = Int32(pos + 1)
+            dst_k[pos] = k
+            dst_o[pos] = src_o[i]
+            i += 1
+        var tk = src_k
+        src_k = dst_k
+        dst_k = tk
+        var to = src_o
+        src_o = dst_o
+        dst_o = to
 
 
 def sort_bound_order(bounds: FPtr, order: I32Ptr, n: Int):
@@ -104,6 +126,13 @@ def edge_key(u: Int, v: Int, n_vertices: Int) -> Int64:
     return Int64(lo) * Int64(n_vertices) + Int64(hi)
 
 
+def max_edge_key(n_vertices: Int) -> Int64:
+    if n_vertices <= 1:
+        return Int64(1)
+    var span = Int64(n_vertices)
+    return span * span - Int64(1)
+
+
 @export("mpf_boundary_edges")
 def boundary_edges(
     faces_addr: Int,
@@ -111,11 +140,15 @@ def boundary_edges(
     n_vertices: Int,
     keys_addr: Int,
     order_addr: Int,
+    keys2_addr: Int,
+    order2_addr: Int,
     edges_addr: Int,
 ) abi("C") -> Int:
     var faces = I32Ptr(unsafe_from_address=faces_addr)
     var keys = I64Ptr(unsafe_from_address=keys_addr)
     var order = I32Ptr(unsafe_from_address=order_addr)
+    var keys2 = I64Ptr(unsafe_from_address=keys2_addr)
+    var order2 = I32Ptr(unsafe_from_address=order2_addr)
     var edges = I32Ptr(unsafe_from_address=edges_addr)
     comptime chunk_size = 2048
 
@@ -143,13 +176,14 @@ def boundary_edges(
         for chunk in range(chunks):
             prepare_chunk(chunk)
     var n = n_faces * 3
-    sort_edge_order(keys, order, n)
+    radix_sort(keys, order, keys2, order2, n, even_passes(max_edge_key(n_vertices)))
     var write = 0
     var i = 0
     while i < n:
+        var k = keys[i]
         var j = i + 1
         var edge = Int(order[i])
-        while j < n and keys[Int(order[j])] == keys[edge]:
+        while j < n and keys[j] == k:
             j += 1
         if j - i == 1:
             var owner = edge // 3
@@ -194,12 +228,16 @@ def face_components(
     n_vertices: Int,
     keys_addr: Int,
     edge_faces_addr: Int,
+    keys2_addr: Int,
+    order2_addr: Int,
     parent_addr: Int,
     labels_addr: Int,
 ) abi("C") -> Int:
     var faces = I32Ptr(unsafe_from_address=faces_addr)
     var keys = I64Ptr(unsafe_from_address=keys_addr)
     var edge_faces = I32Ptr(unsafe_from_address=edge_faces_addr)
+    var keys2 = I64Ptr(unsafe_from_address=keys2_addr)
+    var order2 = I32Ptr(unsafe_from_address=order2_addr)
     var parent = I32Ptr(unsafe_from_address=parent_addr)
     var labels = I32Ptr(unsafe_from_address=labels_addr)
     comptime W = simd_width_of[DType.int32]()
@@ -236,12 +274,15 @@ def face_components(
         for chunk in range(chunks):
             prepare_chunk(chunk)
     var n = n_faces * 3
-    sort_edge_order(keys, edge_faces, n)
+    radix_sort(
+        keys, edge_faces, keys2, order2, n, even_passes(max_edge_key(n_vertices))
+    )
     var i = 0
     while i < n:
+        var k = keys[i]
         var j = i + 1
         var edge = Int(edge_faces[i])
-        while j < n and keys[Int(edge_faces[j])] == keys[edge]:
+        while j < n and keys[j] == k:
             unite(parent, edge // 3, Int(edge_faces[j]) // 3)
             j += 1
         i = j
@@ -688,12 +729,7 @@ def mark_intersections(
     return count
 
 
-@export("mpf_signed_volume")
-def signed_volume(
-    vertices_addr: Int, faces_addr: Int, n_faces: Int
-) abi("C") -> Float64:
-    var vertices = FPtr(unsafe_from_address=vertices_addr)
-    var faces = I32Ptr(unsafe_from_address=faces_addr)
+def volume_total(vertices: FPtr, faces: I32Ptr, n_faces: Int) -> Float64:
     comptime W = simd_width_of[DType.float64]()
     var vector_total = SIMD[DType.float64, W](0.0)
     var f = 0
@@ -731,3 +767,207 @@ def signed_volume(
         total += vertices[a * 3 + 2] * (bx * cy - by * cx)
         f += 1
     return total / 6.0
+
+
+@export("mpf_signed_volume")
+def signed_volume(
+    vertices_addr: Int, faces_addr: Int, n_faces: Int
+) abi("C") -> Float64:
+    var vertices = FPtr(unsafe_from_address=vertices_addr)
+    var faces = I32Ptr(unsafe_from_address=faces_addr)
+    return volume_total(vertices, faces, n_faces)
+
+
+@export("mpf_orient")
+def orient(
+    vertices_addr: Int,
+    faces_addr: Int,
+    out_addr: Int,
+    n_faces: Int,
+    n_vertices: Int,
+    keys_addr: Int,
+    order_addr: Int,
+    keys2_addr: Int,
+    order2_addr: Int,
+    pair_addr: Int,
+    parent_addr: Int,
+    labels_addr: Int,
+    flip_addr: Int,
+    queue_addr: Int,
+    vol_addr: Int,
+) abi("C") -> Int:
+    var vertices = FPtr(unsafe_from_address=vertices_addr)
+    var faces = I32Ptr(unsafe_from_address=faces_addr)
+    var out = I32Ptr(unsafe_from_address=out_addr)
+    var keys = I64Ptr(unsafe_from_address=keys_addr)
+    var order = I32Ptr(unsafe_from_address=order_addr)
+    var keys2 = I64Ptr(unsafe_from_address=keys2_addr)
+    var order2 = I32Ptr(unsafe_from_address=order2_addr)
+    var pair = I32Ptr(unsafe_from_address=pair_addr)
+    var parent = I32Ptr(unsafe_from_address=parent_addr)
+    var labels = I32Ptr(unsafe_from_address=labels_addr)
+    var flip = I32Ptr(unsafe_from_address=flip_addr)
+    var queue = I32Ptr(unsafe_from_address=queue_addr)
+    var vol = FPtr(unsafe_from_address=vol_addr)
+    var n = n_faces * 3
+    if n == 0:
+        return 0
+    comptime chunk_size = 2048
+
+    def prepare_chunk(
+        chunk: Int,
+    ) {imm faces, imm keys, imm order, imm n_faces, imm n_vertices}:
+        var start = chunk * chunk_size
+        var end = min(start + chunk_size, n_faces)
+        for f in range(start, end):
+            var a = Int(faces[f * 3])
+            var b = Int(faces[f * 3 + 1])
+            var c = Int(faces[f * 3 + 2])
+            var base = f * 3
+            keys[base] = edge_key(a, b, n_vertices)
+            keys[base + 1] = edge_key(b, c, n_vertices)
+            keys[base + 2] = edge_key(c, a, n_vertices)
+            order[base] = Int32(base)
+            order[base + 1] = Int32(base + 1)
+            order[base + 2] = Int32(base + 2)
+
+    var chunks = (n_faces + chunk_size - 1) // chunk_size
+    if n_faces >= 65536:
+        parallelize(prepare_chunk, chunks, min(chunks, 8))
+    else:
+        for chunk in range(chunks):
+            prepare_chunk(chunk)
+
+    var f = 0
+    while f < n_faces:
+        parent[f] = Int32(f)
+        flip[f] = Int32(-1)
+        f += 1
+
+    radix_sort(keys, order, keys2, order2, n, even_passes(max_edge_key(n_vertices)))
+
+    var i = 0
+    while i < n:
+        var k = keys[i]
+        var j = i + 1
+        while j < n and keys[j] == k:
+            j += 1
+        if j - i == 2:
+            var ha = Int(order[i])
+            var hb = Int(order[i + 1])
+            var fa = ha // 3
+            var la = ha - fa * 3
+            var fb = hb // 3
+            var lb = hb - fb * 3
+            var togg = Int32(0)
+            if faces[fa * 3 + la] == faces[fb * 3 + lb] and faces[
+                fa * 3 + (la + 1) % 3
+            ] == faces[fb * 3 + (lb + 1) % 3]:
+                togg = Int32(1)
+            pair[ha] = Int32(((i + 1) << 1) | Int(togg))
+            pair[hb] = Int32((i << 1) | Int(togg))
+            unite(parent, fa, fb)
+        else:
+            var t = i
+            while t < j:
+                pair[Int(order[t])] = Int32(-2) if j - i == 1 else Int32(-1)
+                if t > i:
+                    unite(parent, Int(order[t - 1]) // 3, Int(order[t]) // 3)
+                t += 1
+        i = j
+
+    f = 0
+    while f < n_faces:
+        labels[f] = Int32(find_root(parent, f))
+        f += 1
+
+    for root in range(n_faces):
+        if Int(flip[root]) >= 0:
+            continue
+        flip[root] = Int32(0)
+        var head = 0
+        var tail = 1
+        queue[0] = Int32(root)
+        while head < tail:
+            var cur = Int(queue[head])
+            head += 1
+            var base = cur * 3
+            for e in range(3):
+                var code = Int(pair[base + e])
+                if code < 0:
+                    continue
+                var other = Int(order[code >> 1]) // 3
+                if Int(flip[other]) < 0:
+                    flip[other] = flip[cur] ^ Int32(code & 1)
+                    queue[tail] = Int32(other)
+                    tail += 1
+
+    f = 0
+    while f < n_faces:
+        queue[f] = Int32(0)
+        f += 1
+    f = 0
+    while f < n:
+        if Int(pair[f]) == -2:
+            queue[Int(labels[f // 3])] = Int32(1)
+        f += 1
+    var n_roots = 0
+    var n_open = 0
+    f = 0
+    while f < n_faces:
+        var root = Int(labels[f])
+        if root == f:
+            n_roots += 1
+            if Int(queue[f]) != 0:
+                n_open += 1
+        f += 1
+    var closed = n_roots - n_open
+
+    f = 0
+    while f < n_faces:
+        var b = faces[f * 3 + 1]
+        var c = faces[f * 3 + 2]
+        if Int(flip[f]) == 1:
+            out[f * 3] = faces[f * 3]
+            out[f * 3 + 1] = c
+            out[f * 3 + 2] = b
+        else:
+            out[f * 3] = faces[f * 3]
+            out[f * 3 + 1] = b
+            out[f * 3 + 2] = c
+        f += 1
+
+    if closed == 1 and n_roots == 1:
+        if volume_total(vertices, out, n_faces) < 0.0:
+            for f in range(n_faces):
+                var b = out[f * 3 + 1]
+                out[f * 3 + 1] = out[f * 3 + 2]
+                out[f * 3 + 2] = b
+        return 0
+    if closed > 0:
+        f = 0
+        while f < n_faces:
+            vol[f] = 0.0
+            f += 1
+        for f in range(n_faces):
+            var a = Int(out[f * 3])
+            var b = Int(out[f * 3 + 1])
+            var c = Int(out[f * 3 + 2])
+            var bx = vertices[b * 3]
+            var by = vertices[b * 3 + 1]
+            var bz = vertices[b * 3 + 2]
+            var cx = vertices[c * 3]
+            var cy = vertices[c * 3 + 1]
+            var cz = vertices[c * 3 + 2]
+            vol[Int(labels[f])] += (
+                vertices[a * 3] * (by * cz - bz * cy)
+                + vertices[a * 3 + 1] * (bz * cx - bx * cz)
+                + vertices[a * 3 + 2] * (bx * cy - by * cx)
+            )
+        for f in range(n_faces):
+            var root = Int(labels[f])
+            if vol[root] < 0.0 and Int(queue[root]) == 0:
+                var b = out[f * 3 + 1]
+                out[f * 3 + 1] = out[f * 3 + 2]
+                out[f * 3 + 2] = b
+    return 0
